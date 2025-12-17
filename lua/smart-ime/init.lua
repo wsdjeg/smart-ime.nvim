@@ -7,11 +7,22 @@ local default_opt = {
     enable_log = true,
 }
 
+local log
+
 function M.setup(opt)
     opt = vim.tbl_deep_extend('force', default_opt, opt or {})
     local augroup = vim.api.nvim_create_augroup('smart-ime.nvim', { clear = true })
 
-    local log = require('logger').derive('smart-ime')
+    if opt.enable_log then
+        pcall(function()
+            log = require('logger').derive('smart-ime')
+        end)
+    end
+    local function info(msg)
+        if log and opt.enable_log then
+            log.info(msg)
+        end
+    end
 
     local create_autocmd = vim.api.nvim_create_autocmd
 
@@ -35,7 +46,7 @@ function M.setup(opt)
                 -- 这里说明下，再 Windows Terminal 内执行该命令输出的内容默认编码是 `cp936`,
                 -- 需要转码成 utf-8，同时，输出内容尾部有换行符，使用 trim 函数去除。
                 local m = vim.trim(vim.iconv(o.stdout, 'cp936', 'utf-8'))
-                log.info('save buffer insert mode: ' .. m)
+                info('save buffer insert mode: ' .. m)
                 buffer_im[ev.buf] = m
             end)
             imselect_en()
@@ -48,7 +59,7 @@ function M.setup(opt)
             if buffer_im[ev.buf] and buffer_im[ev.buf] ~= '英语模式' then
                 -- 此处设置快捷键，可以在输入法按键设置里面查看，我选择的是使用 ctrl-space 切换中英文
                 -- 默认我记得是 shift，同时这个命令默认也是 `-k=shift`
-                log.info('change to ' .. buffer_im[ev.buf])
+                info('change to ' .. buffer_im[ev.buf])
                 vim.system({ imselect, '-k=ctrl+space', buffer_im[ev.buf] })
             end
         end,
@@ -58,16 +69,16 @@ function M.setup(opt)
         pattern = { '*' },
         group = augroup,
         callback = function(ev)
-            log.info(string.format('%s event is triggered', ev.event))
+            info(string.format('%s event is triggered', ev.event))
             if vim.fn.mode() == 'n' then
-                log.info('switch to english in normal mode')
+                info('switch to english in normal mode')
                 imselect_en()
             elseif vim.fn.mode() == 'i' then
                 if buffer_im[ev.buf] == '英语模式' then
-                    log.info('switch to english in insert mode')
+                    info('switch to english in insert mode')
                     imselect_en()
                 elseif buffer_im[ev.buf] == '中文模式' then
-                    log.info('switch to chinese in insert mode')
+                    info('switch to chinese in insert mode')
                     imselect_cn()
                 end
             end

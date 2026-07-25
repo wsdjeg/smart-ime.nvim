@@ -41,12 +41,126 @@ function M.setup(opt)
         return
     end
 
-    local function imselect_cn()
-        vim.system({ imselect, '-k=ctrl+space', '中文模式' })
+    info('imselect path: ' .. imselect)
+
+    -- Switch key for IME toggle
+    local switch_key = opt.switch_key or 'ctrl+space'
+
+    -- Whether imselect query works (set to false after first failure)
+    local query_works = true
+
+    -- Whether imselect switch works (set to false after first failure)
+    local switch_works = true
+
+    ---Run imselect query via cmd.exe redirect to file
+    ---This bypasses the wcout pipe issue on Windows where wcout
+    ---silently fails when stdout is a pipe (not a console).
+    ---File redirect works because the file handle is a regular file,
+    ---not an anonymous pipe.
+    ---@return string output
+    local function imselect_query()
+        local tmpfile = vim.fn.tempname()
+        -- vim.fn.system on Windows calls: cmd.exe /c <command>
+        -- So we just need: "imselect.exe" > "tmpfile" 2>&1
+        local cmd_str = string.format('"%s" -v > "%s" 2>&1', imselect, tmpfile)
+        info('executing query via file redirect: ' .. cmd_str)
+
+        vim.fn.system(cmd_str)
+        local lines = vim.fn.readfile(tmpfile)
+        vim.fn.delete(tmpfile)
+
+        local output = table.concat(lines or {}, '\n')
+        info('query output (len=' .. #output .. '): ' .. output)
+
+        return output
     end
 
-    local function imselect_en()
-        vim.system({ imselect, '-k=ctrl+space', '英语模式' })
+    ---Parse imselect verbose output to extract current IME mode
+    ---The mode line is output via cout in UTF-8 (w2utf8 conversion).
+    ---Verbose messages are via wcout in system locale encoding.
+    ---We look for lines ending with 模式 (mode) which is UTF-8.
+    ---@param output string
+    ---@return string mode
+    local function parse_mode(output)
+        if not output or output == '' then
+            return ''
+        end
+        -- Search for mode in output (中文模式 or 英语模式)
+        -- These are output in UTF-8 by cout, so they should be readable
+        local lines = vim.split(output, '\n')
+        for i = #lines, 1, -1 do
+            local line = vim.trim(lines[i])
+            if line ~= '' then
+                -- Check if it's a mode (中文模式 or 英语模式)
+                if line:match('模式$') then
+                    return line
+                end
+            end
+        end
+        return ''
+    end
+
+    ---Switch IME using im-select-mspy.exe
+    ---@param target string target mode (中文模式 or 英语模式)
+    local function imselect_switch(target)
+        info('imselect_switch: ' .. target .. ', key: ' .. switch_key)
+        vim.system({ imselect, '-k=' .. switch_key, target })
+    end
+
+    ---Convert key string (e.g. "ctrl+space") to PowerShell SendKeys format
+    ---@param key_str string
+    ---@return string
+    local function key_to_sendkeys(key_str)
+        local parts = vim.split(key_str, '+')
+        local modifiers = ''
+        local main_key = ''
+        for _, part in ipairs(parts) do
+            part = vim.trim(part):lower()
+            if part == 'ctrl' then
+                modifiers = modifiers .. '^'
+            elseif part == 'shift' then
+                modifiers = modifiers .. '+'
+            elseif part == 'alt' then
+                modifiers = modifiers .. '%'
+            elseif part == 'space' then
+                main_key = '{SPACE}'
+            elseif part ~= '' then
+                main_key = part
+            end
+        end
+        local result = modifiers .. main_key
+        info('key_to_sendkeys: ' .. key_str .. ' -> ' .. result)
+        return result
+    end
+
+    ---Fallback: switch IME using PowerShell WScript.Shell.SendKeys
+    ---Sends the key combination directly without needing UIAutomation.
+    ---This works even when im-select-mspy.exe can't find the IME button.
+    ---@param target string target mode (for logging only)
+    local function powershell_switch(target)
+        info('powershell_switch: ' .. target .. ', key: ' .. switch_key)
+        local ps_key = key_to_sendkeys(switch_key)
+        local ps_cmd = string.format("(New-Object -ComObject WScript.Shell).SendKeys('%s')", ps_key)
+        info('powershell command: ' .. ps_cmd)
+        vim.system({ 'powershell.exe', '-NoProfile', '-Command', ps_cmd })
+    end
+
+    ---Switch to English IME
+    local function switch_to_en()
+        if switch_works then
+            imselect_switch('英语模式')
+        else
+            powershell_switch('英语模式')
+        end
+    end
+
+    ---Switch to Chinese IME
+    local function switch_to_cn()
+        if switch_works then
+            imselect_switch('中文模式')
+        else
+            powershell_switch('中文模式')
+        end
     end
 
     local buffer_im = {}
@@ -55,38 +169,52 @@ function M.setup(opt)
         pattern = { '*' },
         group = augroup,
         callback = function(ev)
-            -- 同步读取当前输入法状态并保存，然后切换到英文模式。
-            -- 使用 :wait() 而非回调，因为在 vim.system 回调中启动新的 vim.system
-            -- 可能无法正常工作（回调运行在 libuv 上下文中）。
-            -- 这里说明下，再 Windows Terminal 内执行该命令输出的内容默认编码是 `cp936`,
-            -- 需要转码成 utf-8，同时，输出内容尾部有换行符，使用 trim 函数去除。
-            local obj = vim.system({ imselect }, { text = true }):wait()
-            local m = vim.trim(vim.iconv(obj.stdout, 'cp936', 'utf-8'))
-            if m == '' then
-                -- im-select-mspy.exe 通过 UIAutomation 读取任务栏输入法指示器，
-                -- 如果任务栏自动隐藏或正则不匹配，会返回空输出。
-                -- 此时保留之前的 buffer_im 状态（由 InsertEnter 切换时记录），
-                -- 仍然切换到英文模式。
-                local stderr = vim.trim(vim.iconv(obj.stderr, 'cp936', 'utf-8'))
-                warn('imselect returned empty output, keeping previous state. stderr: ' .. stderr)
+            info(string.format('InsertLeave triggered, buf=%d, event=%s', ev.buf, ev.event))
+            info('current buffer_im state: ' .. vim.inspect(buffer_im))
+
+            if query_works then
+                local output = imselect_query()
+                local mode = parse_mode(output)
+
+                info('parsed mode: "' .. mode .. '" (len=' .. #mode .. ')')
+
+                if mode == '' then
+                    warn('imselect query returned empty mode, falling back to manual tracking')
+                    warn('imselect raw output: ' .. output)
+                    query_works = false
+                    switch_works = false
+                    warn('switching to PowerShell SendInput fallback for IME switching')
+                else
+                    info('save buffer insert mode: ' .. mode)
+                    buffer_im[ev.buf] = mode
+                    info('buffer_im[' .. ev.buf .. '] = ' .. buffer_im[ev.buf])
+                end
             else
-                info('save buffer insert mode: ' .. m)
-                buffer_im[ev.buf] = m
+                -- Query doesn't work, track state manually
+                if not buffer_im[ev.buf] then
+                    buffer_im[ev.buf] = '中文模式'
+                    info('query unavailable, assuming buffer_im[' .. ev.buf .. '] = 中文模式')
+                end
             end
-            -- 无论检测是否成功，都切换到英文模式
+
             info('switch to english on InsertLeave')
-            imselect_en()
+            switch_to_en()
         end,
     })
+
     create_autocmd(opt.restore_on, {
         pattern = { '*' },
         group = augroup,
         callback = function(ev)
+            info(string.format('InsertEnter triggered, buf=%d', ev.buf))
+            info('buffer_im[' .. ev.buf .. '] = ' .. tostring(buffer_im[ev.buf]))
+            info('current buffer_im state: ' .. vim.inspect(buffer_im))
+
             if buffer_im[ev.buf] and buffer_im[ev.buf] ~= '' and buffer_im[ev.buf] ~= '英语模式' then
-                -- 此处设置快捷键，可以在输入法按键设置里面查看，我选择的是使用 ctrl-space 切换中英文
-                -- 默认我记得是 shift，同时这个命令默认也是 `-k=shift`
                 info('change to ' .. buffer_im[ev.buf])
-                vim.system({ imselect, '-k=ctrl+space', buffer_im[ev.buf] })
+                switch_to_cn()
+            else
+                info('no need to switch, buffer_im is empty or already english')
             end
         end,
     })
@@ -97,21 +225,32 @@ function M.setup(opt)
         callback = function(ev)
             local buf = ev.buf
             local event = ev.event
-            info(string.format('%s event is triggered', event))
-            -- 延迟切换输入法，等待 Neovim 完全获得焦点后再执行，
-            -- 否则 FocusGained 触发时窗口可能还没到前台，切换会失效。
+            info(string.format('%s event is triggered, buf=%d', event, buf))
+            info('buffer_im[' .. buf .. '] = ' .. tostring(buffer_im[buf]))
             vim.defer_fn(function()
-                if vim.fn.mode() == 'n' then
+                local mode = vim.fn.mode()
+                info(string.format(
+                    'deferred %s handler: mode=%s, buffer_im[%d]=%s',
+                    event,
+                    mode,
+                    buf,
+                    tostring(buffer_im[buf])
+                ))
+                if mode == 'n' then
                     info('switch to english in normal mode')
-                    imselect_en()
-                elseif vim.fn.mode() == 'i' then
+                    switch_to_en()
+                elseif mode == 'i' then
                     if buffer_im[buf] == '英语模式' then
                         info('switch to english in insert mode')
-                        imselect_en()
+                        switch_to_en()
                     elseif buffer_im[buf] == '中文模式' then
                         info('switch to chinese in insert mode')
-                        imselect_cn()
+                        switch_to_cn()
+                    else
+                        info('insert mode but buffer_im is not english or chinese: ' .. tostring(buffer_im[buf]))
                     end
+                else
+                    info('mode is not n or i: ' .. mode .. ', no action')
                 end
             end, opt.delay)
         end,

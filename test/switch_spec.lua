@@ -6,35 +6,38 @@ local lu = require('luaunit')
 TestSwitch = {}
 
 -- ---------------------------------------------------------------------------
--- Mock infrastructure: capture vim.system calls and mock vim.iconv
+-- Mock infrastructure
 -- ---------------------------------------------------------------------------
 
-local system_calls
+local system_calls        -- captures vim.system calls (switch commands)
+local fn_system_calls     -- captures vim.fn.system calls (query commands)
 local original_system
-local original_iconv
+local original_fn_system
+local original_tempname
+local original_readfile
+local original_delete
 local mock_stdout
 
 local function setup_mock(stdout)
     mock_stdout = stdout or ''
     system_calls = {}
-    original_system = vim.system
-    original_iconv = vim.iconv
+    fn_system_calls = {}
 
+    original_system = vim.system
+    original_fn_system = vim.fn.system
+    original_tempname = vim.fn.tempname
+    original_readfile = vim.fn.readfile
+    original_delete = vim.fn.delete
+
+    -- Mock vim.system for switch commands (imselect_switch and powershell_switch)
     ---@diagnostic disable-next-line: duplicate-set-field
     vim.system = function(cmd, opts, on_exit)
         table.insert(system_calls, { cmd = cmd, opts = opts })
 
-        local result = {
-            stdout = mock_stdout,
-            stderr = '',
-            code = 0,
-        }
-
-        local obj = {
-            wait = function()
-                return result
-            end,
-        }
+        local result = { stdout = '', stderr = '', code = 0 }
+        local obj = { wait = function()
+            return result
+        end }
 
         if on_exit then
             vim.schedule(function()
@@ -45,9 +48,29 @@ local function setup_mock(stdout)
         return obj
     end
 
+    -- Mock vim.fn.system for query commands
     ---@diagnostic disable-next-line: duplicate-set-field
-    vim.iconv = function(s, from, to)
-        return s
+    vim.fn.system = function(cmd)
+        table.insert(fn_system_calls, cmd)
+        return ''
+    end
+
+    -- Mock vim.fn.tempname
+    vim.fn.tempname = function()
+        return '/tmp/mock-imselect-output'
+    end
+
+    -- Mock vim.fn.readfile to return mock_stdout as lines
+    vim.fn.readfile = function(_path)
+        if mock_stdout == '' then
+            return {}
+        end
+        return vim.split(mock_stdout, '\n')
+    end
+
+    -- Mock vim.fn.delete as no-op
+    vim.fn.delete = function(_path)
+        return 0
     end
 end
 
@@ -56,13 +79,25 @@ local function teardown_mock()
         vim.system = original_system
         original_system = nil
     end
-    if original_iconv then
-        vim.iconv = original_iconv
-        original_iconv = nil
+    if original_fn_system then
+        vim.fn.system = original_fn_system
+        original_fn_system = nil
+    end
+    if original_tempname then
+        vim.fn.tempname = original_tempname
+        original_tempname = nil
+    end
+    if original_readfile then
+        vim.fn.readfile = original_readfile
+        original_readfile = nil
+    end
+    if original_delete then
+        vim.fn.delete = original_delete
+        original_delete = nil
     end
 end
 
---- Find a system call whose cmd array contains ALL given args.
+--- Find a vim.system call whose cmd array contains ALL given args.
 local function find_call(...)
     local args = { ... }
     for _, call in ipairs(system_calls) do
@@ -87,14 +122,19 @@ local function find_call(...)
     return nil
 end
 
---- Find the query call (imselect with no extra args).
-local function find_query_call(imselect)
+--- Find a vim.system call that looks like a PowerShell switch.
+local function find_powershell_call()
     for _, call in ipairs(system_calls) do
-        if #call.cmd == 1 and call.cmd[1] == imselect then
+        if call.cmd[1] == 'powershell.exe' then
             return call
         end
     end
     return nil
+end
+
+--- Find any vim.system call that is an imselect switch (contains target mode).
+local function find_switch_call(target)
+    return find_call(target)
 end
 
 -- ---------------------------------------------------------------------------
@@ -125,7 +165,7 @@ function TestSwitch:test_insert_leave_switches_to_english_with_detection()
 
     vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
 
-    lu.assertNotNil(find_call('英语模式'), 'should switch to English on InsertLeave')
+    lu.assertNotNil(find_switch_call('英语模式'), 'should switch to English on InsertLeave')
 end
 
 function TestSwitch:test_insert_leave_switches_to_english_without_detection()
@@ -139,7 +179,8 @@ function TestSwitch:test_insert_leave_switches_to_english_without_detection()
 
     vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
 
-    lu.assertNotNil(find_call('英语模式'), 'should switch to English even when detection returns empty')
+    -- When detection fails, should fall back to PowerShell
+    lu.assertNotNil(find_powershell_call(), 'should use PowerShell fallback when detection fails')
 end
 
 function TestSwitch:test_insert_leave_queries_current_state()
@@ -153,7 +194,9 @@ function TestSwitch:test_insert_leave_queries_current_state()
 
     vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
 
-    lu.assertNotNil(find_query_call('mock-imselect'), 'should query current IME state')
+    lu.assertTrue(#fn_system_calls > 0, 'should query current IME state via vim.fn.system')
+    lu.assertNotNil(string.find(fn_system_calls[1], 'mock-imselect', 1, true),
+        'query command should contain imselect path')
 end
 
 function TestSwitch:test_insert_leave_switch_command_has_correct_args()
@@ -167,7 +210,7 @@ function TestSwitch:test_insert_leave_switch_command_has_correct_args()
 
     vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
 
-    local en_call = find_call('英语模式')
+    local en_call = find_switch_call('英语模式')
     lu.assertNotNil(en_call, 'should have English switch call')
     lu.assertEquals(en_call.cmd[1], 'mock-imselect')
     lu.assertEquals(en_call.cmd[2], '-k=ctrl+space')
@@ -192,7 +235,8 @@ function TestSwitch:test_insert_leave_saves_chinese_state()
     -- InsertEnter should restore Chinese
     vim.api.nvim_exec_autocmds('InsertEnter', { pattern = '*' })
 
-    lu.assertNotNil(find_call('中文模式'), 'should restore Chinese on InsertEnter after saving Chinese state')
+    lu.assertNotNil(find_switch_call('中文模式'),
+        'should restore Chinese on InsertEnter after saving Chinese state')
 end
 
 -- ---------------------------------------------------------------------------
@@ -217,8 +261,8 @@ function TestSwitch:test_insert_enter_no_switch_when_english()
     -- InsertEnter should NOT switch (already English)
     vim.api.nvim_exec_autocmds('InsertEnter', { pattern = '*' })
 
-    lu.assertNil(find_call('中文模式'), 'should not switch to Chinese when saved state is English')
-    lu.assertNil(find_call('英语模式'), 'should not switch at all when saved state is English')
+    lu.assertNil(find_switch_call('中文模式'), 'should not switch to Chinese when saved state is English')
+    lu.assertNil(find_switch_call('英语模式'), 'should not switch at all when saved state is English')
 end
 
 function TestSwitch:test_insert_enter_no_switch_without_saved_state()
@@ -233,8 +277,8 @@ function TestSwitch:test_insert_enter_no_switch_without_saved_state()
     -- Trigger InsertEnter directly (no prior InsertLeave to save state)
     vim.api.nvim_exec_autocmds('InsertEnter', { pattern = '*' })
 
-    lu.assertNil(find_call('中文模式'), 'should not switch to Chinese without saved state')
-    lu.assertNil(find_call('英语模式'), 'should not switch to English on InsertEnter')
+    lu.assertNil(find_switch_call('中文模式'), 'should not switch to Chinese without saved state')
+    lu.assertNil(find_switch_call('英语模式'), 'should not switch to English on InsertEnter')
 end
 
 -- ---------------------------------------------------------------------------
@@ -262,10 +306,12 @@ function TestSwitch:test_empty_output_keeps_previous_state()
     -- Clear calls
     system_calls = {}
 
-    -- InsertEnter should still restore Chinese (state was preserved)
+    -- InsertEnter should still restore Chinese
+    -- After query failure, switch_works=false, so it uses PowerShell
     vim.api.nvim_exec_autocmds('InsertEnter', { pattern = '*' })
 
-    lu.assertNotNil(find_call('中文模式'), 'should restore Chinese even after detection failure')
+    lu.assertNotNil(find_powershell_call(),
+        'should use PowerShell to restore Chinese even after detection failure')
 end
 
 -- ---------------------------------------------------------------------------
@@ -289,11 +335,14 @@ function TestSwitch:test_focus_gained_normal_mode_switches_to_english()
 
     -- Wait for deferred function to execute
     local ok = vim.wait(1000, function()
-        return find_call('英语模式') ~= nil
+        return #system_calls > 0
     end, 10)
 
     lu.assertTrue(ok, 'deferred FocusGained handler should execute within timeout')
-    lu.assertNotNil(find_call('英语模式'), 'should switch to English on FocusGained in normal mode')
+    -- After query failure on InsertLeave, switch_works=false, uses PowerShell
+    -- But if no InsertLeave happened yet, switch_works is still true
+    lu.assertTrue(find_switch_call('英语模式') ~= nil or find_powershell_call() ~= nil,
+        'should switch to English on FocusGained in normal mode')
 end
 
 function TestSwitch:test_focus_gained_normal_mode_switches_to_english_with_chinese_state()
@@ -319,12 +368,13 @@ function TestSwitch:test_focus_gained_normal_mode_switches_to_english_with_chine
     vim.api.nvim_exec_autocmds('FocusGained', { pattern = '*' })
 
     local ok = vim.wait(1000, function()
-        return find_call('英语模式') ~= nil
+        return #system_calls > 0
     end, 10)
 
     lu.assertTrue(ok, 'deferred FocusGained handler should execute within timeout')
-    lu.assertNotNil(find_call('英语模式'), 'should switch to English on FocusGained in normal mode')
-    lu.assertNil(find_call('中文模式'), 'should not switch to Chinese in normal mode')
+    lu.assertTrue(find_switch_call('英语模式') ~= nil or find_powershell_call() ~= nil,
+        'should switch to English on FocusGained in normal mode')
+    lu.assertNil(find_switch_call('中文模式'), 'should not switch to Chinese in normal mode')
 end
 
 return TestSwitch

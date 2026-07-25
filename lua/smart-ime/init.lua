@@ -91,7 +91,6 @@ function M.setup(opt)
         end
 
         local ps_cmd = table.concat(ps_parts, '; ')
-        info('powershell command: ' .. ps_cmd)
         vim.system({ 'powershell.exe', '-NoProfile', '-Command', ps_cmd })
     end
 

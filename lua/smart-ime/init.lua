@@ -5,6 +5,7 @@ local default_opt = {
     restore_on = { 'InsertEnter' },
     normalize_on = { 'FocusGained' },
     enable_log = true,
+    delay = 100,
 }
 
 local log
@@ -69,21 +70,28 @@ function M.setup(opt)
         pattern = { '*' },
         group = augroup,
         callback = function(ev)
-            info(string.format('%s event is triggered', ev.event))
-            if vim.fn.mode() == 'n' then
-                info('switch to english in normal mode')
-                imselect_en()
-            elseif vim.fn.mode() == 'i' then
-                if buffer_im[ev.buf] == '英语模式' then
-                    info('switch to english in insert mode')
+            local buf = ev.buf
+            local event = ev.event
+            info(string.format('%s event is triggered', event))
+            -- 延迟切换输入法，等待 Neovim 完全获得焦点后再执行，
+            -- 否则 FocusGained 触发时窗口可能还没到前台，切换会失效。
+            vim.defer_fn(function()
+                if vim.fn.mode() == 'n' then
+                    info('switch to english in normal mode')
                     imselect_en()
-                elseif buffer_im[ev.buf] == '中文模式' then
-                    info('switch to chinese in insert mode')
-                    imselect_cn()
+                elseif vim.fn.mode() == 'i' then
+                    if buffer_im[buf] == '英语模式' then
+                        info('switch to english in insert mode')
+                        imselect_en()
+                    elseif buffer_im[buf] == '中文模式' then
+                        info('switch to chinese in insert mode')
+                        imselect_cn()
+                    end
                 end
-            end
+            end, opt.delay)
         end,
     })
 end
 
 return M
+

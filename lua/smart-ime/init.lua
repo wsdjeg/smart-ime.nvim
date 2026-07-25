@@ -43,14 +43,19 @@ function M.setup(opt)
         pattern = { '*' },
         group = augroup,
         callback = function(ev)
+            local buf = ev.buf
+            -- 先读取并保存当前输入法状态，再切换到英文模式。
+            -- 如果两者并行执行会有竞态：切换可能先于读取完成，
+            -- 导致保存到错误的状态，或切换本身被读取命令干扰。
             vim.system({ imselect }, { text = true }, function(o)
                 -- 这里说明下，再 Windows Terminal 内执行该命令输出的内容默认编码是 `cp936`,
                 -- 需要转码成 utf-8，同时，输出内容尾部有换行符，使用 trim 函数去除。
                 local m = vim.trim(vim.iconv(o.stdout, 'cp936', 'utf-8'))
                 info('save buffer insert mode: ' .. m)
-                buffer_im[ev.buf] = m
+                buffer_im[buf] = m
+                info('switch to english after save')
+                imselect_en()
             end)
-            imselect_en()
         end,
     })
     create_autocmd(opt.restore_on, {

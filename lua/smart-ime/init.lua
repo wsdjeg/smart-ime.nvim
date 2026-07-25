@@ -6,6 +6,12 @@ local default_opt = {
     normalize_on = { 'FocusGained' },
     enable_log = true,
     delay = 100,
+    ---@type 'auto'|'powershell'|'imselect'
+    engine = 'auto',
+    ---@type string IME toggle key, e.g. "ctrl+space", "shift"
+    switch_key = 'ctrl+space',
+    ---@type string? path to im-select tool (not needed for engine='powershell')
+    imselect = nil,
 }
 
 local log
@@ -33,27 +39,30 @@ function M.setup(opt)
 
     local create_autocmd = vim.api.nvim_create_autocmd
 
-    -- vim.system 不经过 shell，不会自动展开 ~，需要手动展开
+    local engine = opt.engine
+    local switch_key = opt.switch_key
     local imselect = opt.imselect and vim.fn.expand(opt.imselect) or nil
 
-    if not imselect or imselect == '' then
-        warn('imselect is not configured, smart-ime will not work')
-        return
+    info('engine: ' .. engine .. ', switch_key: ' .. switch_key)
+    if imselect then
+        info('imselect path: ' .. imselect)
     end
 
-    info('imselect path: ' .. imselect)
+    -- Validate config
+    if engine ~= 'powershell' and (not imselect or imselect == '') then
+        warn('imselect is not configured, falling back to engine=powershell')
+        engine = 'powershell'
+    end
 
-    -- Switch key for IME toggle
-    local switch_key = opt.switch_key or 'ctrl+space'
+    -- State flags
+    local query_works = (engine == 'auto' or engine == 'imselect')
+    local switch_works = (engine == 'auto' or engine == 'imselect')
 
-    -- Whether imselect query works (set to false after first failure)
-    local query_works = true
-
-    -- Whether imselect switch works (set to false after first failure)
-    local switch_works = true
+    if engine == 'powershell' then
+        info('using powershell engine, skipping imselect entirely')
+    end
 
     ---Run imselect query via cmd.exe redirect to file
-    ---Bypasses wcout pipe issue by using file redirect.
     ---@return string output
     local function imselect_query()
         local tmpfile = vim.fn.tempname()
@@ -87,7 +96,7 @@ function M.setup(opt)
         return ''
     end
 
-    ---Switch IME using im-select-mspy.exe
+    ---Switch IME using im-select tool
     ---@param target string target mode (中文模式 or 英语模式)
     local function imselect_switch(target)
         info('imselect_switch: ' .. target .. ', key: ' .. switch_key)
@@ -96,7 +105,7 @@ function M.setup(opt)
 
     ---Parse key string into VK codes for keybd_event
     ---@param key_str string e.g. "ctrl+space", "shift"
-    ---@return table[] array of {vk, down} entries
+    ---@return table array of VK codes
     local function parse_key_to_vk(key_str)
         local vk_map = {
             ctrl = 0x11,
@@ -119,9 +128,8 @@ function M.setup(opt)
         return keys
     end
 
-    ---Fallback: switch IME using PowerShell keybd_event API
-    ---Sends the key combination directly at the system level,
-    ---bypassing UIAutomation entirely.
+    ---Switch IME using PowerShell keybd_event API
+    ---Sends the key combination directly at the system level.
     ---@param target string target mode (for logging only)
     local function powershell_switch(target)
         info('powershell_switch: ' .. target .. ', key: ' .. switch_key)
@@ -133,7 +141,6 @@ function M.setup(opt)
         end
 
         -- Build PowerShell script using keybd_event
-        -- keybd_event sends keys at the system level, works for IME switching
         local ps_parts = {
             "$sig = '[DllImport(\"user32.dll\")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, System.UIntPtr dwExtraInfo);'",
             "Add-Type -MemberDefinition $sig -Name 'KB' -Namespace 'IME'",

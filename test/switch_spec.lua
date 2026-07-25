@@ -151,7 +151,92 @@ function TestSwitch:tearDown()
 end
 
 -- ---------------------------------------------------------------------------
--- InsertLeave tests
+-- engine = 'powershell' tests
+-- ---------------------------------------------------------------------------
+
+function TestSwitch:test_powershell_engine_skips_imselect_query()
+    setup_mock('')
+
+    local smart_ime = require('smart-ime')
+    smart_ime.setup({
+        engine = 'powershell',
+        enable_log = false,
+    })
+
+    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+
+    lu.assertEquals(#fn_system_calls, 0, 'should not query imselect at all')
+end
+
+function TestSwitch:test_powershell_engine_uses_powershell_switch()
+    setup_mock('')
+
+    local smart_ime = require('smart-ime')
+    smart_ime.setup({
+        engine = 'powershell',
+        enable_log = false,
+    })
+
+    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+
+    lu.assertNotNil(find_powershell_call(), 'should use PowerShell for switching')
+    lu.assertNil(find_switch_call('英语模式'), 'should not call imselect for switching')
+end
+
+function TestSwitch:test_powershell_engine_works_without_imselect_config()
+    setup_mock('')
+
+    local smart_ime = require('smart-ime')
+    smart_ime.setup({
+        engine = 'powershell',
+        enable_log = false,
+        -- no imselect config
+    })
+
+    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+
+    lu.assertNotNil(find_powershell_call(), 'should work without imselect config')
+end
+
+function TestSwitch:test_powershell_engine_restores_chinese_on_insertenter()
+    setup_mock('')
+
+    local smart_ime = require('smart-ime')
+    smart_ime.setup({
+        engine = 'powershell',
+        enable_log = false,
+    })
+
+    -- InsertLeave: assumes Chinese, switches to English via PowerShell
+    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+
+    system_calls = {}
+
+    -- InsertEnter: should restore Chinese via PowerShell
+    vim.api.nvim_exec_autocmds('InsertEnter', { pattern = '*' })
+
+    lu.assertNotNil(find_powershell_call(), 'should use PowerShell to restore Chinese')
+end
+
+function TestSwitch:test_powershell_engine_uses_custom_switch_key()
+    setup_mock('')
+
+    local smart_ime = require('smart-ime')
+    smart_ime.setup({
+        engine = 'powershell',
+        switch_key = 'shift',
+        enable_log = false,
+    })
+
+    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+
+    local ps_call = find_powershell_call()
+    lu.assertNotNil(ps_call, 'should use PowerShell')
+    lu.assertNotNil(string.find(ps_call.cmd[4], '0x10'), 'should use shift VK code (0x10)')
+end
+
+-- ---------------------------------------------------------------------------
+-- InsertLeave tests (engine = 'auto')
 -- ---------------------------------------------------------------------------
 
 function TestSwitch:test_insert_leave_switches_to_english_with_detection()
@@ -240,7 +325,7 @@ function TestSwitch:test_insert_leave_saves_chinese_state()
 end
 
 -- ---------------------------------------------------------------------------
--- InsertEnter tests
+-- InsertEnter tests (engine = 'auto')
 -- ---------------------------------------------------------------------------
 
 function TestSwitch:test_insert_enter_no_switch_when_english()

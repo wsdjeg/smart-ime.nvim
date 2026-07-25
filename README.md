@@ -206,5 +206,5 @@ If you encounter any bugs or have suggestions, please file an issue in the [issu
 
 ## 📄 License
 
-Licensed under MIT.
+Licensed under GPL-3.0.
 

@@ -63,11 +63,17 @@ function M.setup(opt)
             local obj = vim.system({ imselect }, { text = true }):wait()
             local m = vim.trim(vim.iconv(obj.stdout, 'cp936', 'utf-8'))
             if m == '' then
-                warn('imselect returned empty output, skip saving')
-                return
+                -- im-select-mspy.exe 通过 UIAutomation 读取任务栏输入法指示器，
+                -- 如果任务栏自动隐藏或正则不匹配，会返回空输出。
+                -- 此时保留之前的 buffer_im 状态（由 InsertEnter 切换时记录），
+                -- 仍然切换到英文模式。
+                local stderr = vim.trim(vim.iconv(obj.stderr, 'cp936', 'utf-8'))
+                warn('imselect returned empty output, keeping previous state. stderr: ' .. stderr)
+            else
+                info('save buffer insert mode: ' .. m)
+                buffer_im[ev.buf] = m
             end
-            info('save buffer insert mode: ' .. m)
-            buffer_im[ev.buf] = m
+            -- 无论检测是否成功，都切换到英文模式
             info('switch to english on InsertLeave')
             imselect_en()
         end,

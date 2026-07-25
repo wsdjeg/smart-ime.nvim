@@ -2,6 +2,7 @@
 
 Smart per-buffer IME switching for Neovim.
 
+[![Run Tests](https://github.com/wsdjeg/smart-ime.nvim/actions/workflows/test.yml/badge.svg)](https://github.com/wsdjeg/smart-ime.nvim/actions/workflows/test.yml)
 [![GitHub License](https://img.shields.io/github/license/wsdjeg/smart-ime.nvim)](LICENSE)
 [![GitHub Issues or Pull Requests](https://img.shields.io/github/issues/wsdjeg/smart-ime.nvim)](https://github.com/wsdjeg/smart-ime.nvim/issues)
 [![GitHub commit activity](https://img.shields.io/github/commit-activity/m/wsdjeg/smart-ime.nvim)](https://github.com/wsdjeg/smart-ime.nvim/commits/master/)
@@ -49,3 +50,4 @@ return {
     },
 }
 ```
+

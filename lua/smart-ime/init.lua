@@ -25,9 +25,21 @@ function M.setup(opt)
         end
     end
 
+    local function warn(msg)
+        if log and opt.enable_log then
+            log.warn(msg)
+        end
+    end
+
     local create_autocmd = vim.api.nvim_create_autocmd
 
-    local imselect = opt.imselect
+    -- vim.system 不经过 shell，不会自动展开 ~，需要手动展开
+    local imselect = opt.imselect and vim.fn.expand(opt.imselect) or nil
+
+    if not imselect or imselect == '' then
+        warn('imselect is not configured, smart-ime will not work')
+        return
+    end
 
     local function imselect_cn()
         vim.system({ imselect, '-k=ctrl+space', '中文模式' })
@@ -50,6 +62,10 @@ function M.setup(opt)
             -- 需要转码成 utf-8，同时，输出内容尾部有换行符，使用 trim 函数去除。
             local obj = vim.system({ imselect }, { text = true }):wait()
             local m = vim.trim(vim.iconv(obj.stdout, 'cp936', 'utf-8'))
+            if m == '' then
+                warn('imselect returned empty output, skip saving')
+                return
+            end
             info('save buffer insert mode: ' .. m)
             buffer_im[ev.buf] = m
             info('switch to english on InsertLeave')
@@ -60,7 +76,7 @@ function M.setup(opt)
         pattern = { '*' },
         group = augroup,
         callback = function(ev)
-            if buffer_im[ev.buf] and buffer_im[ev.buf] ~= '英语模式' then
+            if buffer_im[ev.buf] and buffer_im[ev.buf] ~= '' and buffer_im[ev.buf] ~= '英语模式' then
                 -- 此处设置快捷键，可以在输入法按键设置里面查看，我选择的是使用 ctrl-space 切换中英文
                 -- 默认我记得是 shift，同时这个命令默认也是 `-k=shift`
                 info('change to ' .. buffer_im[ev.buf])

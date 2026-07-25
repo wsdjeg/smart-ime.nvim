@@ -6,12 +6,8 @@ local default_opt = {
     normalize_on = { 'FocusGained' },
     enable_log = true,
     delay = 100,
-    ---@type 'auto'|'powershell'|'imselect'
-    engine = 'auto',
     ---@type string IME toggle key, e.g. "ctrl+space", "shift"
     switch_key = 'ctrl+space',
-    ---@type string? path to im-select tool (not needed for engine='powershell')
-    imselect = nil,
 }
 
 local log
@@ -38,70 +34,9 @@ function M.setup(opt)
     end
 
     local create_autocmd = vim.api.nvim_create_autocmd
-
-    local engine = opt.engine
     local switch_key = opt.switch_key
-    local imselect = opt.imselect and vim.fn.expand(opt.imselect) or nil
 
-    info('engine: ' .. engine .. ', switch_key: ' .. switch_key)
-    if imselect then
-        info('imselect path: ' .. imselect)
-    end
-
-    -- Validate config
-    if engine ~= 'powershell' and (not imselect or imselect == '') then
-        warn('imselect is not configured, falling back to engine=powershell')
-        engine = 'powershell'
-    end
-
-    -- State flags
-    local query_works = (engine == 'auto' or engine == 'imselect')
-    local switch_works = (engine == 'auto' or engine == 'imselect')
-
-    if engine == 'powershell' then
-        info('using powershell engine, skipping imselect entirely')
-    end
-
-    ---Run imselect query via cmd.exe redirect to file
-    ---@return string output
-    local function imselect_query()
-        local tmpfile = vim.fn.tempname()
-        local cmd_str = string.format('"%s" -v > "%s" 2>&1', imselect, tmpfile)
-        info('executing query via file redirect: ' .. cmd_str)
-
-        vim.fn.system(cmd_str)
-        local lines = vim.fn.readfile(tmpfile)
-        vim.fn.delete(tmpfile)
-
-        local output = table.concat(lines or {}, '\n')
-        info('query output (len=' .. #output .. '): ' .. output)
-
-        return output
-    end
-
-    ---Parse imselect verbose output to extract current IME mode
-    ---@param output string
-    ---@return string mode
-    local function parse_mode(output)
-        if not output or output == '' then
-            return ''
-        end
-        local lines = vim.split(output, '\n')
-        for i = #lines, 1, -1 do
-            local line = vim.trim(lines[i])
-            if line ~= '' and line:match('模式$') then
-                return line
-            end
-        end
-        return ''
-    end
-
-    ---Switch IME using im-select tool
-    ---@param target string target mode (中文模式 or 英语模式)
-    local function imselect_switch(target)
-        info('imselect_switch: ' .. target .. ', key: ' .. switch_key)
-        vim.system({ imselect, '-k=' .. switch_key, target })
-    end
+    info('switch_key: ' .. switch_key)
 
     ---Parse key string into VK codes for keybd_event
     ---@param key_str string e.g. "ctrl+space", "shift"
@@ -160,22 +95,12 @@ function M.setup(opt)
         vim.system({ 'powershell.exe', '-NoProfile', '-Command', ps_cmd })
     end
 
-    ---Switch to English IME
     local function switch_to_en()
-        if switch_works then
-            imselect_switch('英语模式')
-        else
-            powershell_switch('英语模式')
-        end
+        powershell_switch('英语模式')
     end
 
-    ---Switch to Chinese IME
     local function switch_to_cn()
-        if switch_works then
-            imselect_switch('中文模式')
-        else
-            powershell_switch('中文模式')
-        end
+        powershell_switch('中文模式')
     end
 
     local buffer_im = {}
@@ -185,31 +110,11 @@ function M.setup(opt)
         group = augroup,
         callback = function(ev)
             info(string.format('InsertLeave triggered, buf=%d, event=%s', ev.buf, ev.event))
-            info('current buffer_im state: ' .. vim.inspect(buffer_im))
 
-            if query_works then
-                local output = imselect_query()
-                local mode = parse_mode(output)
-
-                info('parsed mode: "' .. mode .. '" (len=' .. #mode .. ')')
-
-                if mode == '' then
-                    warn('imselect query returned empty mode, falling back to manual tracking')
-                    warn('imselect raw output: ' .. output)
-                    query_works = false
-                    switch_works = false
-                    warn('switching to PowerShell keybd_event fallback for IME switching')
-                else
-                    info('save buffer insert mode: ' .. mode)
-                    buffer_im[ev.buf] = mode
-                    info('buffer_im[' .. ev.buf .. '] = ' .. buffer_im[ev.buf])
-                end
-            else
-                -- Query doesn't work, track state manually
-                if not buffer_im[ev.buf] then
-                    buffer_im[ev.buf] = '中文模式'
-                    info('query unavailable, assuming buffer_im[' .. ev.buf .. '] = 中文模式')
-                end
+            -- Track state manually (no query available)
+            if not buffer_im[ev.buf] then
+                buffer_im[ev.buf] = '中文模式'
+                info('assuming buffer_im[' .. ev.buf .. '] = 中文模式')
             end
 
             info('switch to english on InsertLeave')
@@ -223,7 +128,6 @@ function M.setup(opt)
         callback = function(ev)
             info(string.format('InsertEnter triggered, buf=%d', ev.buf))
             info('buffer_im[' .. ev.buf .. '] = ' .. tostring(buffer_im[ev.buf]))
-            info('current buffer_im state: ' .. vim.inspect(buffer_im))
 
             if buffer_im[ev.buf] and buffer_im[ev.buf] ~= '' and buffer_im[ev.buf] ~= '英语模式' then
                 info('change to ' .. buffer_im[ev.buf])
@@ -241,7 +145,6 @@ function M.setup(opt)
             local buf = ev.buf
             local event = ev.event
             info(string.format('%s event is triggered, buf=%d', event, buf))
-            info('buffer_im[' .. buf .. '] = ' .. tostring(buffer_im[buf]))
             vim.defer_fn(function()
                 local mode = vim.fn.mode()
                 info(string.format(
@@ -261,11 +164,7 @@ function M.setup(opt)
                     elseif buffer_im[buf] == '中文模式' then
                         info('switch to chinese in insert mode')
                         switch_to_cn()
-                    else
-                        info('insert mode but buffer_im is not english or chinese: ' .. tostring(buffer_im[buf]))
                     end
-                else
-                    info('mode is not n or i: ' .. mode .. ', no action')
                 end
             end, opt.delay)
         end,

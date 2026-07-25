@@ -53,15 +53,10 @@ function M.setup(opt)
     local switch_works = true
 
     ---Run imselect query via cmd.exe redirect to file
-    ---This bypasses the wcout pipe issue on Windows where wcout
-    ---silently fails when stdout is a pipe (not a console).
-    ---File redirect works because the file handle is a regular file,
-    ---not an anonymous pipe.
+    ---Bypasses wcout pipe issue by using file redirect.
     ---@return string output
     local function imselect_query()
         local tmpfile = vim.fn.tempname()
-        -- vim.fn.system on Windows calls: cmd.exe /c <command>
-        -- So we just need: "imselect.exe" > "tmpfile" 2>&1
         local cmd_str = string.format('"%s" -v > "%s" 2>&1', imselect, tmpfile)
         info('executing query via file redirect: ' .. cmd_str)
 
@@ -76,25 +71,17 @@ function M.setup(opt)
     end
 
     ---Parse imselect verbose output to extract current IME mode
-    ---The mode line is output via cout in UTF-8 (w2utf8 conversion).
-    ---Verbose messages are via wcout in system locale encoding.
-    ---We look for lines ending with 模式 (mode) which is UTF-8.
     ---@param output string
     ---@return string mode
     local function parse_mode(output)
         if not output or output == '' then
             return ''
         end
-        -- Search for mode in output (中文模式 or 英语模式)
-        -- These are output in UTF-8 by cout, so they should be readable
         local lines = vim.split(output, '\n')
         for i = #lines, 1, -1 do
             local line = vim.trim(lines[i])
-            if line ~= '' then
-                -- Check if it's a mode (中文模式 or 英语模式)
-                if line:match('模式$') then
-                    return line
-                end
+            if line ~= '' and line:match('模式$') then
+                return line
             end
         end
         return ''
@@ -107,40 +94,61 @@ function M.setup(opt)
         vim.system({ imselect, '-k=' .. switch_key, target })
     end
 
-    ---Convert key string (e.g. "ctrl+space") to PowerShell SendKeys format
-    ---@param key_str string
-    ---@return string
-    local function key_to_sendkeys(key_str)
+    ---Parse key string into VK codes for keybd_event
+    ---@param key_str string e.g. "ctrl+space", "shift"
+    ---@return table[] array of {vk, down} entries
+    local function parse_key_to_vk(key_str)
+        local vk_map = {
+            ctrl = 0x11,
+            shift = 0x10,
+            alt = 0x12,
+            space = 0x20,
+            win = 0x5B,
+        }
         local parts = vim.split(key_str, '+')
-        local modifiers = ''
-        local main_key = ''
+        local keys = {}
         for _, part in ipairs(parts) do
             part = vim.trim(part):lower()
-            if part == 'ctrl' then
-                modifiers = modifiers .. '^'
-            elseif part == 'shift' then
-                modifiers = modifiers .. '+'
-            elseif part == 'alt' then
-                modifiers = modifiers .. '%'
-            elseif part == 'space' then
-                main_key = '{SPACE}'
-            elseif part ~= '' then
-                main_key = part
+            local vk = vk_map[part]
+            if vk then
+                table.insert(keys, vk)
+            elseif part:match('^0x[0-9a-fA-F]+$') then
+                table.insert(keys, tonumber(part:sub(3), 16))
             end
         end
-        local result = modifiers .. main_key
-        info('key_to_sendkeys: ' .. key_str .. ' -> ' .. result)
-        return result
+        return keys
     end
 
-    ---Fallback: switch IME using PowerShell WScript.Shell.SendKeys
-    ---Sends the key combination directly without needing UIAutomation.
-    ---This works even when im-select-mspy.exe can't find the IME button.
+    ---Fallback: switch IME using PowerShell keybd_event API
+    ---Sends the key combination directly at the system level,
+    ---bypassing UIAutomation entirely.
     ---@param target string target mode (for logging only)
     local function powershell_switch(target)
         info('powershell_switch: ' .. target .. ', key: ' .. switch_key)
-        local ps_key = key_to_sendkeys(switch_key)
-        local ps_cmd = string.format("(New-Object -ComObject WScript.Shell).SendKeys('%s')", ps_key)
+
+        local keys = parse_key_to_vk(switch_key)
+        if #keys == 0 then
+            warn('failed to parse switch_key: ' .. switch_key)
+            return
+        end
+
+        -- Build PowerShell script using keybd_event
+        -- keybd_event sends keys at the system level, works for IME switching
+        local ps_parts = {
+            "$sig = '[DllImport(\"user32.dll\")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, System.UIntPtr dwExtraInfo);'",
+            "Add-Type -MemberDefinition $sig -Name 'KB' -Namespace 'IME'",
+        }
+
+        -- Key down events (dwFlags=0)
+        for _, vk in ipairs(keys) do
+            table.insert(ps_parts, string.format('[IME.KB]::keybd_event(0x%02X, 0, 0, [System.UIntPtr]::Zero)', vk))
+        end
+        -- Key up events in reverse order (dwFlags=2 = KEYEVENTF_KEYUP)
+        for i = #keys, 1, -1 do
+            table.insert(ps_parts, string.format('[IME.KB]::keybd_event(0x%02X, 0, 2, [System.UIntPtr]::Zero)', keys[i]))
+        end
+
+        local ps_cmd = table.concat(ps_parts, '; ')
         info('powershell command: ' .. ps_cmd)
         vim.system({ 'powershell.exe', '-NoProfile', '-Command', ps_cmd })
     end
@@ -183,7 +191,7 @@ function M.setup(opt)
                     warn('imselect raw output: ' .. output)
                     query_works = false
                     switch_works = false
-                    warn('switching to PowerShell SendInput fallback for IME switching')
+                    warn('switching to PowerShell keybd_event fallback for IME switching')
                 else
                     info('save buffer insert mode: ' .. mode)
                     buffer_im[ev.buf] = mode

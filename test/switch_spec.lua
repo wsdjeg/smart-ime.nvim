@@ -20,14 +20,37 @@ local function setup_mock()
 
     ---Mock vim.system supporting both :wait() and on_exit callback.
     ---on_exit is called synchronously to simplify test assertions.
+    ---
+    ---Two types of PowerShell calls:
+    ---  1. smart_switch  — contains GetForegroundWindow (query + conditional toggle)
+    ---  2. powershell_switch (fallback) — contains keybd_event but NOT GetForegroundWindow
     ---@diagnostic disable-next-line: duplicate-set-field
     vim.system = function(cmd, opts, on_exit)
         local cmd_str = table.concat(cmd, ' ')
-        local is_query = string.find(cmd_str, 'GetForegroundWindow') ~= nil
+        local has_query = string.find(cmd_str, 'GetForegroundWindow') ~= nil
+        local has_keybd = string.find(cmd_str, 'keybd_event') ~= nil
 
-        if is_query then
-            -- Query call: return mock state, don't record in system_calls
-            local result = { stdout = mock_im_state or 'unknown', stderr = '', code = 0 }
+        if has_query then
+            -- smart_switch call: simulate query + conditional toggle
+            local target = 'english'
+            if string.find(cmd_str, "%$target = 'chinese'") then
+                target = 'chinese'
+            end
+
+            local mock_state = mock_im_state or 'unknown'
+            local should_toggle = false
+            if mock_state == 'chinese' and target == 'english' then
+                should_toggle = true
+            elseif mock_state == 'english' and target == 'chinese' then
+                should_toggle = true
+            end
+
+            if should_toggle then
+                table.insert(system_calls, { cmd = cmd, opts = opts })
+                mock_im_state = target
+            end
+
+            local result = { stdout = mock_state, stderr = '', code = 0 }
             local obj = { wait = function()
                 return result
             end }
@@ -37,24 +60,31 @@ local function setup_mock()
             return obj
         end
 
-        -- Toggle call: record it
-        table.insert(system_calls, { cmd = cmd, opts = opts })
-
-        local result = { stdout = '', stderr = '', code = 0 }
-        local obj = { wait = function()
-            return result
-        end }
-
-        if on_exit then
-            on_exit(result)
+        -- Fallback toggle call (powershell_switch, no query)
+        if has_keybd then
+            table.insert(system_calls, { cmd = cmd, opts = opts })
+            local result = { stdout = '', stderr = '', code = 0 }
+            local obj = { wait = function()
+                return result
+            end }
+            if on_exit then
+                on_exit(result)
+            end
+            return obj
         end
 
-        return obj
+        -- Unknown call
+        local result = { stdout = '', stderr = '', code = 0 }
+        return { wait = function()
+            return result
+        end }
     end
 end
 
----Mock that defers query callbacks instead of executing them synchronously.
+---Mock that defers smart_switch callbacks instead of executing them synchronously.
 ---Allows testing race conditions by controlling callback execution order.
+---Toggle decision is made at callback time (execution time), not call time,
+---so mock_im_state changes between deferral and execution are respected.
 ---@return table pending list of deferred on_exit functions
 local function setup_deferred_mock()
     system_calls = {}
@@ -66,22 +96,48 @@ local function setup_deferred_mock()
     ---@diagnostic disable-next-line: duplicate-set-field
     vim.system = function(cmd, opts, on_exit)
         local cmd_str = table.concat(cmd, ' ')
-        local is_query = string.find(cmd_str, 'GetForegroundWindow') ~= nil
+        local has_query = string.find(cmd_str, 'GetForegroundWindow') ~= nil
+        local has_keybd = string.find(cmd_str, 'keybd_event') ~= nil
 
-        if is_query then
-            local result = { stdout = mock_im_state or 'unknown', stderr = '', code = 0 }
+        if has_query then
+            -- smart_switch call: defer callback, decide toggle at execution time
+            local target = 'english'
+            if string.find(cmd_str, "%$target = 'chinese'") then
+                target = 'chinese'
+            end
+
             if on_exit then
                 table.insert(pending, function()
-                    on_exit(result)
+                    -- Query at execution time (not call time)
+                    local mock_state = mock_im_state or 'unknown'
+                    local should_toggle = false
+                    if mock_state == 'chinese' and target == 'english' then
+                        should_toggle = true
+                    elseif mock_state == 'english' and target == 'chinese' then
+                        should_toggle = true
+                    end
+
+                    if should_toggle then
+                        table.insert(system_calls, { cmd = cmd, opts = opts })
+                        mock_im_state = target
+                    end
+
+                    on_exit({ stdout = mock_state, stderr = '', code = 0 })
                 end)
             end
             return { wait = function()
-                return result
+                return { stdout = mock_im_state or 'unknown', stderr = '', code = 0 }
             end }
         end
 
-        -- Toggle call: record it
-        table.insert(system_calls, { cmd = cmd, opts = opts })
+        -- Fallback toggle call (not deferred)
+        if has_keybd then
+            table.insert(system_calls, { cmd = cmd, opts = opts })
+            return { wait = function()
+                return { stdout = '', stderr = '', code = 0 }
+            end }
+        end
+
         return { wait = function()
             return { stdout = '', stderr = '', code = 0 }
         end }
@@ -101,7 +157,7 @@ local function set_mock_im_state(state)
     mock_im_state = state
 end
 
---- Find a vim.system call that is a PowerShell toggle (not a query).
+--- Find a vim.system call that is a PowerShell toggle.
 local function find_powershell_call()
     for _, call in ipairs(system_calls) do
         if call.cmd[1] == 'powershell.exe' then
@@ -111,7 +167,7 @@ local function find_powershell_call()
     return nil
 end
 
---- Find all PowerShell toggle calls (not queries).
+--- Find all PowerShell toggle calls.
 local function find_all_powershell_calls()
     local calls = {}
     for _, call in ipairs(system_calls) do
@@ -147,7 +203,7 @@ function TestSwitch:test_insert_leave_switches_to_english()
 
     vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
 
-    lu.assertNotNil(find_powershell_call(), 'should use PowerShell on InsertLeave')
+    lu.assertNotNil(find_powershell_call(), 'should toggle on InsertLeave')
 end
 
 function TestSwitch:test_insert_leave_saves_chinese_state()
@@ -230,30 +286,6 @@ function TestSwitch:test_insert_leave_toggles_when_query_says_chinese()
     lu.assertNotNil(find_powershell_call(), 'should toggle when query says Chinese')
 end
 
-function TestSwitch:test_insert_enter_skips_toggle_when_already_chinese()
-    setup_mock()
-    set_mock_im_state('chinese')
-
-    local smart_ime = require('smart-ime')
-    smart_ime.setup({ enable_log = false })
-
-    -- InsertLeave: query says Chinese, toggles to English
-    -- Set mock to English after InsertLeave to simulate the toggle effect
-    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
-    set_mock_im_state('english')
-
-    system_calls = {}
-
-    -- InsertEnter: buffer_im says Chinese, but query says already Chinese
-    -- Wait - after InsertLeave toggled to English, mock says English now
-    -- InsertEnter should restore Chinese
-    set_mock_im_state('english') -- IM is English after InsertLeave toggle
-    vim.api.nvim_exec_autocmds('InsertEnter', { pattern = '*' })
-
-    -- Should toggle to Chinese
-    lu.assertNotNil(find_powershell_call(), 'should toggle to Chinese on InsertEnter')
-end
-
 function TestSwitch:test_insert_enter_skips_when_query_says_already_chinese()
     setup_mock()
     set_mock_im_state('chinese')
@@ -286,7 +318,7 @@ function TestSwitch:test_fallback_when_query_fails()
     local smart_ime = require('smart-ime')
     smart_ime.setup({ enable_log = false })
 
-    -- First InsertLeave: query fails, current_im is nil -> toggle
+    -- First InsertLeave: query fails, current_im is nil -> blind toggle
     vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
     lu.assertNotNil(find_powershell_call(), 'should toggle on first InsertLeave when query fails')
 
@@ -342,7 +374,7 @@ function TestSwitch:test_custom_switch_key_shift()
     vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
 
     local ps_call = find_powershell_call()
-    lu.assertNotNil(ps_call, 'should use PowerShell')
+    lu.assertNotNil(ps_call, 'should toggle')
     lu.assertNotNil(string.find(ps_call.cmd[4], '0x10'), 'should use shift VK code (0x10)')
 end
 
@@ -358,7 +390,7 @@ function TestSwitch:test_custom_switch_key_ctrl_space()
     vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
 
     local ps_call = find_powershell_call()
-    lu.assertNotNil(ps_call, 'should use PowerShell')
+    lu.assertNotNil(ps_call, 'should toggle')
     lu.assertNotNil(string.find(ps_call.cmd[4], '0x11'), 'should contain ctrl VK code (0x11)')
     lu.assertNotNil(string.find(ps_call.cmd[4], '0x20'), 'should contain space VK code (0x20)')
 end
@@ -448,46 +480,80 @@ end
 -- ---------------------------------------------------------------------------
 
 ---Test that InsertLeave's async callback is discarded when InsertEnter
----fires before the query completes. Without epoch guarding, the stale
----InsertLeave callback would switch to English AFTER InsertEnter already
----switched to Chinese, leaving the IME in the wrong state.
-function TestSwitch:test_race_insert_leave_discarded_when_enter_follows()
+---fires before the query completes. The callback won't update state
+---(current_im, buffer_im), but the script's internal toggle is
+---unpreventable in merged mode (accepted trade-off for halved latency).
+function TestSwitch:test_race_insert_leave_callback_discarded_when_enter_follows()
     local pending = setup_deferred_mock()
 
     local smart_ime = require('smart-ime')
     smart_ime.setup({ enable_log = false })
 
-    -- 1. InsertLeave fires: query is deferred (not yet executed)
-    --    Early save sets buffer_im[buf] = '中文模式' (current_im is nil)
+    -- 1. InsertLeave fires: smart_switch started, callback deferred
     vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
-    lu.assertEquals(#pending, 1, 'InsertLeave should start one query')
+    lu.assertEquals(#pending, 1, 'InsertLeave should start smart_switch')
     local leave_cb = pending[1]
     pending[1] = nil
 
-    -- 2. InsertEnter fires before InsertLeave's query completes.
+    -- 2. InsertEnter fires before InsertLeave's script completes.
     --    Epoch incremented -> InsertLeave's callback will be stale.
-    --    buffer_im[buf] = '中文模式' (from early save) -> switch_to_cn starts.
     vim.api.nvim_exec_autocmds('InsertEnter', { pattern = '*' })
-    lu.assertEquals(#pending, 1, 'InsertEnter should start switch_to_cn query')
+    lu.assertEquals(#pending, 1, 'InsertEnter should start smart_switch')
     local enter_cb = pending[1]
     pending[1] = nil
 
-    -- 3. Execute InsertLeave's deferred query callback.
-    --    is_valid() -> false (epoch changed in step 2) -> discarded.
+    -- 3. Execute InsertLeave's deferred callback.
+    --    Query fails (mock_im_state nil -> 'unknown'), no toggle in script.
+    --    Callback: is_valid() false -> discarded, no fallback toggle either.
     leave_cb()
-    lu.assertEquals(#system_calls, 0, 'stale InsertLeave callback should NOT toggle')
+    lu.assertEquals(#system_calls, 0, 'stale InsertLeave callback should not produce any toggle')
 
-    -- 4. Execute InsertEnter's deferred query callback.
-    --    is_valid() -> true (current epoch) -> toggle to Chinese.
+    -- 4. Execute InsertEnter's deferred callback.
+    --    Query fails, no toggle in script.
+    --    Callback: is_valid() true -> fallback blind toggle to Chinese.
     enter_cb()
-    lu.assertEquals(#system_calls, 1, 'InsertEnter callback should toggle to Chinese')
+    lu.assertEquals(#system_calls, 1, 'InsertEnter callback should fallback toggle to Chinese')
+
+    teardown_mock()
+end
+
+---Test that when query succeeds, smart_switch toggles inside the script
+---(unpreventable by epoch), but the stale callback still doesn't update
+---state. The valid callback from the newer event works correctly.
+function TestSwitch:test_race_smart_switch_toggles_but_callback_discarded()
+    local pending = setup_deferred_mock()
+    set_mock_im_state('chinese')
+
+    local smart_ime = require('smart-ime')
+    smart_ime.setup({ enable_log = false })
+
+    -- 1. InsertLeave: smart_switch('english'), callback deferred
+    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+    local leave_cb = pending[1]
+    pending[1] = nil
+
+    -- 2. InsertEnter: smart_switch('chinese'), callback deferred
+    vim.api.nvim_exec_autocmds('InsertEnter', { pattern = '*' })
+    local enter_cb = pending[1]
+    pending[1] = nil
+
+    -- 3. Execute InsertLeave's callback.
+    --    Script sees Chinese, toggles to English (toggle recorded).
+    --    Callback: is_valid() false -> discarded (current_im NOT updated).
+    leave_cb()
+    lu.assertEquals(#system_calls, 1, 'InsertLeave script toggled to English (unpreventable in merged mode)')
+
+    -- 4. Execute InsertEnter's callback.
+    --    Script sees English (toggled by step 3), toggles to Chinese.
+    --    Callback: is_valid() true -> current_im = '中文模式'.
+    enter_cb()
+    lu.assertEquals(#system_calls, 2, 'InsertEnter script toggled back to Chinese')
 
     teardown_mock()
 end
 
 ---Test that FocusGained's deferred handler is discarded when InsertLeave
----fires during the delay period. The FocusGained handler should detect
----that a newer event has occurred and abort without toggling.
+---fires during the delay period.
 function TestSwitch:test_race_focus_gained_discarded_when_insert_leave_follows()
     setup_mock()
 
@@ -500,7 +566,7 @@ function TestSwitch:test_race_focus_gained_discarded_when_insert_leave_follows()
     vim.api.nvim_exec_autocmds('FocusGained', { pattern = '*' })
 
     -- 2. InsertLeave fires before deferred handler runs: epoch=2
-    --    Synchronous mock: query + toggle execute immediately
+    --    Synchronous mock: smart_switch executes immediately
     vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
 
     -- Reset to isolate FocusGained's deferred handler output

@@ -11,13 +11,33 @@ TestSwitch = {}
 
 local system_calls
 local original_system
+local mock_im_state
 
 local function setup_mock()
     system_calls = {}
+    mock_im_state = nil
     original_system = vim.system
 
     ---@diagnostic disable-next-line: duplicate-set-field
     vim.system = function(cmd, opts, on_exit)
+        local cmd_str = table.concat(cmd, ' ')
+        local is_query = string.find(cmd_str, 'GetForegroundWindow') ~= nil
+
+        if is_query then
+            -- Query call: return mock state, don't record in system_calls
+            local result = { stdout = mock_im_state or 'unknown', stderr = '', code = 0 }
+            local obj = { wait = function()
+                return result
+            end }
+            if on_exit then
+                vim.schedule(function()
+                    on_exit(result)
+                end)
+            end
+            return obj
+        end
+
+        -- Toggle call: record it
         table.insert(system_calls, { cmd = cmd, opts = opts })
 
         local result = { stdout = '', stderr = '', code = 0 }
@@ -42,7 +62,11 @@ local function teardown_mock()
     end
 end
 
---- Find a vim.system call that is a PowerShell switch.
+local function set_mock_im_state(state)
+    mock_im_state = state
+end
+
+--- Find a vim.system call that is a PowerShell toggle (not a query).
 local function find_powershell_call()
     for _, call in ipairs(system_calls) do
         if call.cmd[1] == 'powershell.exe' then
@@ -52,7 +76,7 @@ local function find_powershell_call()
     return nil
 end
 
---- Find all PowerShell switch calls.
+--- Find all PowerShell toggle calls (not queries).
 local function find_all_powershell_calls()
     local calls = {}
     for _, call in ipairs(system_calls) do
@@ -142,42 +166,100 @@ function TestSwitch:test_insert_enter_restores_after_insert_leave()
 end
 
 -- ---------------------------------------------------------------------------
--- Redundant toggle prevention tests
+-- Redundant toggle prevention tests (query-based)
 -- ---------------------------------------------------------------------------
 
 function TestSwitch:test_insert_leave_skips_toggle_when_already_english()
     setup_mock()
+    set_mock_im_state('english')
 
     local smart_ime = require('smart-ime')
     smart_ime.setup({ enable_log = false })
 
-    -- First InsertLeave: switches to English (current_im was nil)
+    -- Query says already English, should NOT toggle
     vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
 
-    system_calls = {}
+    lu.assertNil(find_powershell_call(), 'should not toggle when query says already English')
+end
 
-    -- Second InsertLeave: already in English, should NOT toggle
+function TestSwitch:test_insert_leave_toggles_when_query_says_chinese()
+    setup_mock()
+    set_mock_im_state('chinese')
+
+    local smart_ime = require('smart-ime')
+    smart_ime.setup({ enable_log = false })
+
+    -- Query says Chinese, should toggle to English
     vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
 
-    lu.assertNil(find_powershell_call(), 'should not toggle when already in English')
+    lu.assertNotNil(find_powershell_call(), 'should toggle when query says Chinese')
 end
 
 function TestSwitch:test_insert_enter_skips_toggle_when_already_chinese()
     setup_mock()
+    set_mock_im_state('chinese')
 
     local smart_ime = require('smart-ime')
     smart_ime.setup({ enable_log = false })
 
-    -- InsertLeave -> English, InsertEnter -> Chinese
+    -- InsertLeave: query says Chinese, toggles to English
+    -- Set mock to English after InsertLeave to simulate the toggle effect
     vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
-    vim.api.nvim_exec_autocmds('InsertEnter', { pattern = '*' })
+    set_mock_im_state('english')
 
     system_calls = {}
 
-    -- Second InsertEnter: already in Chinese, should NOT toggle
+    -- InsertEnter: buffer_im says Chinese, but query says already Chinese
+    -- Wait - after InsertLeave toggled to English, mock says English now
+    -- InsertEnter should restore Chinese
+    set_mock_im_state('english') -- IM is English after InsertLeave toggle
     vim.api.nvim_exec_autocmds('InsertEnter', { pattern = '*' })
 
-    lu.assertNil(find_powershell_call(), 'should not toggle when already in Chinese')
+    -- Should toggle to Chinese
+    lu.assertNotNil(find_powershell_call(), 'should toggle to Chinese on InsertEnter')
+end
+
+function TestSwitch:test_insert_enter_skips_when_query_says_already_chinese()
+    setup_mock()
+    set_mock_im_state('chinese')
+
+    local smart_ime = require('smart-ime')
+    smart_ime.setup({ enable_log = false })
+
+    -- InsertLeave with Chinese state: toggles to English
+    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+
+    -- Now mock that IM is already Chinese (e.g. user manually toggled)
+    set_mock_im_state('chinese')
+
+    system_calls = {}
+
+    -- InsertEnter: buffer_im says Chinese, but query also says Chinese -> skip
+    vim.api.nvim_exec_autocmds('InsertEnter', { pattern = '*' })
+
+    lu.assertNil(find_powershell_call(), 'should not toggle when query says already Chinese')
+end
+
+-- ---------------------------------------------------------------------------
+-- Fallback tests (query fails, use current_im)
+-- ---------------------------------------------------------------------------
+
+function TestSwitch:test_fallback_when_query_fails()
+    setup_mock()
+    -- mock_im_state is nil, so query returns 'unknown' -> nil
+
+    local smart_ime = require('smart-ime')
+    smart_ime.setup({ enable_log = false })
+
+    -- First InsertLeave: query fails, current_im is nil -> toggle
+    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+    lu.assertNotNil(find_powershell_call(), 'should toggle on first InsertLeave when query fails')
+
+    system_calls = {}
+
+    -- Second InsertLeave: query fails, current_im = '英语模式' -> skip
+    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+    lu.assertNil(find_powershell_call(), 'should skip toggle when current_im says English')
 end
 
 -- ---------------------------------------------------------------------------
@@ -300,6 +382,7 @@ end
 
 function TestSwitch:test_focus_gained_normal_mode_skips_when_already_english()
     setup_mock()
+    set_mock_im_state('english')
 
     local smart_ime = require('smart-ime')
     smart_ime.setup({
@@ -307,7 +390,7 @@ function TestSwitch:test_focus_gained_normal_mode_skips_when_already_english()
         delay = 0,
     })
 
-    -- InsertLeave switches to English
+    -- InsertLeave: query says English, no toggle
     vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
 
     system_calls = {}
@@ -320,9 +403,9 @@ function TestSwitch:test_focus_gained_normal_mode_skips_when_already_english()
         return #system_calls > 0
     end, 10)
 
-    -- Already in English after InsertLeave, FocusGained should NOT toggle
+    -- Query says English, should NOT toggle
     local calls = find_all_powershell_calls()
-    lu.assertEquals(#calls, 0, 'should not toggle when already in English')
+    lu.assertEquals(#calls, 0, 'should not toggle when query says already English')
 end
 
 return TestSwitch

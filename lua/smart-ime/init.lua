@@ -38,8 +38,7 @@ function M.setup(opt)
 
     info('switch_key: ' .. switch_key)
 
-    -- Track current IM state to avoid redundant toggles.
-    -- nil = unknown (first toggle always fires), then updated on each switch.
+    -- Fallback state tracking (used when query fails)
     local current_im = nil
 
     ---Parse key string into VK codes for keybd_event
@@ -65,6 +64,36 @@ function M.setup(opt)
             end
         end
         return keys
+    end
+
+    ---Query current IME state via PowerShell (synchronous, blocks ~200-500ms)
+    ---Uses ImmGetDefaultIMEWnd + SendMessage(WM_IME_CONTROL, IMC_GETCONVERSIONMODE)
+    ---to query the actual IME conversion status of the foreground window.
+    ---@return string|nil '中文模式', '英语模式', or nil if query fails
+    local function query_im_state()
+        local ps_script = [[
+try {
+    $sig = '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam); [DllImport("imm32.dll")] public static extern IntPtr ImmGetDefaultIMEWnd(IntPtr hWnd);'
+    Add-Type -MemberDefinition $sig -Name 'IMEQ' -Namespace 'IME'
+    $hwnd = [IME.IMEQ]::GetForegroundWindow()
+    $hIme = [IME.IMEQ]::ImmGetDefaultIMEWnd($hwnd)
+    if ($hIme -eq [IntPtr]::Zero) { 'unknown' } else {
+        $mode = [int][IME.IMEQ]::SendMessage($hIme, 0x0283, [IntPtr]1, [IntPtr]0)
+        if ($mode -band 1) { 'chinese' } else { 'english' }
+    }
+} catch { 'unknown' }
+]]
+
+        local result = vim.system({ 'powershell.exe', '-NoProfile', '-Command', ps_script }, {}):wait()
+        if result.code == 0 then
+            local output = vim.trim(result.stdout or '')
+            if output == 'chinese' then
+                return '中文模式'
+            elseif output == 'english' then
+                return '英语模式'
+            end
+        end
+        return nil
     end
 
     ---Switch IME using PowerShell keybd_event API
@@ -98,20 +127,44 @@ function M.setup(opt)
         vim.system({ 'powershell.exe', '-NoProfile', '-Command', ps_cmd })
     end
 
-    local function switch_to_en()
-        if current_im == '英语模式' then
-            info('already in english, skip toggle')
+    ---Switch to English, querying actual IME state first to avoid redundant toggles.
+    ---@param queried_state string|nil pre-queried state to avoid duplicate query
+    local function switch_to_en(queried_state)
+        local state = queried_state or query_im_state()
+        if state then
+            current_im = state
+        end
+
+        if state == '英语模式' then
+            info('already in english (queried), skip toggle')
             return
         end
+        if state == nil and current_im == '英语模式' then
+            info('query failed, current_im says english, skip toggle')
+            return
+        end
+
         powershell_switch('英语模式')
         current_im = '英语模式'
     end
 
-    local function switch_to_cn()
-        if current_im == '中文模式' then
-            info('already in chinese, skip toggle')
+    ---Switch to Chinese, querying actual IME state first to avoid redundant toggles.
+    ---@param queried_state string|nil pre-queried state to avoid duplicate query
+    local function switch_to_cn(queried_state)
+        local state = queried_state or query_im_state()
+        if state then
+            current_im = state
+        end
+
+        if state == '中文模式' then
+            info('already in chinese (queried), skip toggle')
             return
         end
+        if state == nil and current_im == '中文模式' then
+            info('query failed, current_im says chinese, skip toggle')
+            return
+        end
+
         powershell_switch('中文模式')
         current_im = '中文模式'
     end
@@ -124,14 +177,16 @@ function M.setup(opt)
         callback = function(ev)
             info(string.format('InsertLeave triggered, buf=%d, event=%s', ev.buf, ev.event))
 
-            -- Save current IM state for this buffer before switching
-            if not buffer_im[ev.buf] then
-                buffer_im[ev.buf] = current_im or '中文模式'
-                info('assuming buffer_im[' .. ev.buf .. '] = ' .. (current_im or '中文模式'))
+            -- Query actual IME state and save for this buffer
+            local state = query_im_state()
+            if state then
+                current_im = state
             end
+            buffer_im[ev.buf] = state or current_im or '中文模式'
+            info('buffer_im[' .. ev.buf .. '] = ' .. tostring(buffer_im[ev.buf]))
 
             info('switch to english on InsertLeave')
-            switch_to_en()
+            switch_to_en(state)
         end,
     })
 

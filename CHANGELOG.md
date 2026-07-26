@@ -1,5 +1,28 @@
 # Changelog
 
+## [2.1.0](https://github.com/wsdjeg/smart-ime.nvim/compare/v2.0.0...v2.1.0) (2026-07-26)
+
+
+### Features
+
+* query actual IME state before toggle to handle manual switches ([29031fb](https://github.com/wsdjeg/smart-ime.nvim/commit/29031fb3ef39a9556bd0d517732631d48aba5b03))
+
+
+### Bug Fixes
+
+* prevent async race conditions with epoch-based invalidation ([efb0cc8](https://github.com/wsdjeg/smart-ime.nvim/commit/efb0cc87cb7014aa14cceb443be5a93429182b3f))
+* skip redundant IM toggle when already in target state ([8a47d0b](https://github.com/wsdjeg/smart-ime.nvim/commit/8a47d0b944dfe8da1ac1c727e55b27e368f1b1d6))
+
+
+### Code Refactoring
+
+* **ime:** merge query and toggle into single powershell process ([5794d77](https://github.com/wsdjeg/smart-ime.nvim/commit/5794d778f59ea1e0c66a140410fa26b62af35577))
+
+
+### Performance Improvements
+
+* use async vim.system callback for IME state query ([7db935c](https://github.com/wsdjeg/smart-ime.nvim/commit/7db935c8388cdb08d66fa079a104553cbc53c6f1))
+
 ## [2.0.0](https://github.com/wsdjeg/smart-ime.nvim/compare/v1.0.0...v2.0.0) (2026-07-25)
 
 

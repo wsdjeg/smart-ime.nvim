@@ -18,6 +18,8 @@ local function setup_mock()
     mock_im_state = nil
     original_system = vim.system
 
+    ---Mock vim.system supporting both :wait() and on_exit callback.
+    ---on_exit is called synchronously to simplify test assertions.
     ---@diagnostic disable-next-line: duplicate-set-field
     vim.system = function(cmd, opts, on_exit)
         local cmd_str = table.concat(cmd, ' ')
@@ -30,9 +32,7 @@ local function setup_mock()
                 return result
             end }
             if on_exit then
-                vim.schedule(function()
-                    on_exit(result)
-                end)
+                on_exit(result)
             end
             return obj
         end
@@ -46,9 +46,7 @@ local function setup_mock()
         end }
 
         if on_exit then
-            vim.schedule(function()
-                on_exit(result)
-            end)
+            on_exit(result)
         end
 
         return obj

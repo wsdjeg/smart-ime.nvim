@@ -66,11 +66,11 @@ function M.setup(opt)
         return keys
     end
 
-    ---Query current IME state via PowerShell (synchronous, blocks ~200-500ms)
+    ---Query current IME state via PowerShell (async, non-blocking)
     ---Uses ImmGetDefaultIMEWnd + SendMessage(WM_IME_CONTROL, IMC_GETCONVERSIONMODE)
     ---to query the actual IME conversion status of the foreground window.
-    ---@return string|nil '中文模式', '英语模式', or nil if query fails
-    local function query_im_state()
+    ---@param callback fun(state: string|nil) '中文模式', '英语模式', or nil
+    local function query_im_state(callback)
         local ps_script = [[
 try {
     $sig = '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam); [DllImport("imm32.dll")] public static extern IntPtr ImmGetDefaultIMEWnd(IntPtr hWnd);'
@@ -84,16 +84,19 @@ try {
 } catch { 'unknown' }
 ]]
 
-        local result = vim.system({ 'powershell.exe', '-NoProfile', '-Command', ps_script }, {}):wait()
-        if result.code == 0 then
-            local output = vim.trim(result.stdout or '')
-            if output == 'chinese' then
-                return '中文模式'
-            elseif output == 'english' then
-                return '英语模式'
+        vim.system({ 'powershell.exe', '-NoProfile', '-Command', ps_script }, {}, function(result)
+            if result.code == 0 then
+                local output = vim.trim(result.stdout or '')
+                if output == 'chinese' then
+                    callback('中文模式')
+                    return
+                elseif output == 'english' then
+                    callback('英语模式')
+                    return
+                end
             end
-        end
-        return nil
+            callback(nil)
+        end)
     end
 
     ---Switch IME using PowerShell keybd_event API
@@ -130,43 +133,57 @@ try {
     ---Switch to English, querying actual IME state first to avoid redundant toggles.
     ---@param queried_state string|nil pre-queried state to avoid duplicate query
     local function switch_to_en(queried_state)
-        local state = queried_state or query_im_state()
-        if state then
-            current_im = state
+        local function do_switch(state)
+            if state then
+                current_im = state
+            end
+
+            if state == '英语模式' then
+                info('already in english (queried), skip toggle')
+                return
+            end
+            if state == nil and current_im == '英语模式' then
+                info('query failed, current_im says english, skip toggle')
+                return
+            end
+
+            powershell_switch('英语模式')
+            current_im = '英语模式'
         end
 
-        if state == '英语模式' then
-            info('already in english (queried), skip toggle')
-            return
+        if queried_state then
+            do_switch(queried_state)
+        else
+            query_im_state(do_switch)
         end
-        if state == nil and current_im == '英语模式' then
-            info('query failed, current_im says english, skip toggle')
-            return
-        end
-
-        powershell_switch('英语模式')
-        current_im = '英语模式'
     end
 
     ---Switch to Chinese, querying actual IME state first to avoid redundant toggles.
     ---@param queried_state string|nil pre-queried state to avoid duplicate query
     local function switch_to_cn(queried_state)
-        local state = queried_state or query_im_state()
-        if state then
-            current_im = state
+        local function do_switch(state)
+            if state then
+                current_im = state
+            end
+
+            if state == '中文模式' then
+                info('already in chinese (queried), skip toggle')
+                return
+            end
+            if state == nil and current_im == '中文模式' then
+                info('query failed, current_im says chinese, skip toggle')
+                return
+            end
+
+            powershell_switch('中文模式')
+            current_im = '中文模式'
         end
 
-        if state == '中文模式' then
-            info('already in chinese (queried), skip toggle')
-            return
+        if queried_state then
+            do_switch(queried_state)
+        else
+            query_im_state(do_switch)
         end
-        if state == nil and current_im == '中文模式' then
-            info('query failed, current_im says chinese, skip toggle')
-            return
-        end
-
-        powershell_switch('中文模式')
-        current_im = '中文模式'
     end
 
     local buffer_im = {}
@@ -177,16 +194,17 @@ try {
         callback = function(ev)
             info(string.format('InsertLeave triggered, buf=%d, event=%s', ev.buf, ev.event))
 
-            -- Query actual IME state and save for this buffer
-            local state = query_im_state()
-            if state then
-                current_im = state
-            end
-            buffer_im[ev.buf] = state or current_im or '中文模式'
-            info('buffer_im[' .. ev.buf .. '] = ' .. tostring(buffer_im[ev.buf]))
+            -- Query actual IME state and save for this buffer (async, non-blocking)
+            query_im_state(function(state)
+                if state then
+                    current_im = state
+                end
+                buffer_im[ev.buf] = state or current_im or '中文模式'
+                info('buffer_im[' .. ev.buf .. '] = ' .. tostring(buffer_im[ev.buf]))
 
-            info('switch to english on InsertLeave')
-            switch_to_en(state)
+                info('switch to english on InsertLeave')
+                switch_to_en(state)
+            end)
         end,
     })
 

@@ -41,6 +41,20 @@ function M.setup(opt)
     -- Fallback state tracking (used when query fails)
     local current_im = nil
 
+    ---@diagnostic disable-next-line: lowercase-global
+    ---Epoch counter for async race condition prevention.
+    ---Each event handler increments epoch and captures its value.
+    ---Async callbacks check if their captured epoch is still current;
+    ---if not, they are discarded (a newer event has superseded them).
+    local epoch = 0
+
+    ---Increment epoch and return the new value.
+    ---Call at the start of every event handler to invalidate stale callbacks.
+    local function new_epoch()
+        epoch = epoch + 1
+        return epoch
+    end
+
     ---Parse key string into VK codes for keybd_event
     ---@param key_str string e.g. "ctrl+space", "shift"
     ---@return table array of VK codes
@@ -132,8 +146,13 @@ try {
 
     ---Switch to English, querying actual IME state first to avoid redundant toggles.
     ---@param queried_state string|nil pre-queried state to avoid duplicate query
-    local function switch_to_en(queried_state)
+    ---@param is_valid fun(): boolean|nil epoch validator; if false, abort the switch
+    local function switch_to_en(queried_state, is_valid)
         local function do_switch(state)
+            if is_valid and not is_valid() then
+                return
+            end
+
             if state then
                 current_im = state
             end
@@ -154,14 +173,24 @@ try {
         if queried_state then
             do_switch(queried_state)
         else
-            query_im_state(do_switch)
+            query_im_state(function(state)
+                if is_valid and not is_valid() then
+                    return
+                end
+                do_switch(state)
+            end)
         end
     end
 
     ---Switch to Chinese, querying actual IME state first to avoid redundant toggles.
     ---@param queried_state string|nil pre-queried state to avoid duplicate query
-    local function switch_to_cn(queried_state)
+    ---@param is_valid fun(): boolean|nil epoch validator; if false, abort the switch
+    local function switch_to_cn(queried_state, is_valid)
         local function do_switch(state)
+            if is_valid and not is_valid() then
+                return
+            end
+
             if state then
                 current_im = state
             end
@@ -182,7 +211,12 @@ try {
         if queried_state then
             do_switch(queried_state)
         else
-            query_im_state(do_switch)
+            query_im_state(function(state)
+                if is_valid and not is_valid() then
+                    return
+                end
+                do_switch(state)
+            end)
         end
     end
 
@@ -194,8 +228,23 @@ try {
         callback = function(ev)
             info(string.format('InsertLeave triggered, buf=%d, event=%s', ev.buf, ev.event))
 
+            local ep = new_epoch()
+            local is_valid = function()
+                return epoch == ep
+            end
+
+            -- Early save: best-guess before async query completes.
+            -- Ensures InsertEnter (if it fires immediately after) can read a
+            -- reasonable value from buffer_im instead of stale data.
+            buffer_im[ev.buf] = current_im or '中文模式'
+
             -- Query actual IME state and save for this buffer (async, non-blocking)
             query_im_state(function(state)
+                if not is_valid() then
+                    info('InsertLeave callback discarded (superseded by newer event)')
+                    return
+                end
+
                 if state then
                     current_im = state
                 end
@@ -203,7 +252,7 @@ try {
                 info('buffer_im[' .. ev.buf .. '] = ' .. tostring(buffer_im[ev.buf]))
 
                 info('switch to english on InsertLeave')
-                switch_to_en(state)
+                switch_to_en(state, is_valid)
             end)
         end,
     })
@@ -215,9 +264,14 @@ try {
             info(string.format('InsertEnter triggered, buf=%d', ev.buf))
             info('buffer_im[' .. ev.buf .. '] = ' .. tostring(buffer_im[ev.buf]))
 
+            local ep = new_epoch()
+            local is_valid = function()
+                return epoch == ep
+            end
+
             if buffer_im[ev.buf] and buffer_im[ev.buf] ~= '' and buffer_im[ev.buf] ~= '英语模式' then
                 info('change to ' .. buffer_im[ev.buf])
-                switch_to_cn()
+                switch_to_cn(nil, is_valid)
             else
                 info('no need to switch, buffer_im is empty or already english')
             end
@@ -231,7 +285,18 @@ try {
             local buf = ev.buf
             local event = ev.event
             info(string.format('%s event is triggered, buf=%d', event, buf))
+
+            local ep = new_epoch()
+            local is_valid = function()
+                return epoch == ep
+            end
+
             vim.defer_fn(function()
+                if not is_valid() then
+                    info(string.format('%s deferred handler discarded (superseded)', event))
+                    return
+                end
+
                 local mode = vim.fn.mode()
                 info(string.format(
                     'deferred %s handler: mode=%s, buffer_im[%d]=%s',
@@ -242,14 +307,14 @@ try {
                 ))
                 if mode == 'n' then
                     info('switch to english in normal mode')
-                    switch_to_en()
+                    switch_to_en(nil, is_valid)
                 elseif mode == 'i' then
                     if buffer_im[buf] == '英语模式' then
                         info('switch to english in insert mode')
-                        switch_to_en()
+                        switch_to_en(nil, is_valid)
                     elseif buffer_im[buf] == '中文模式' then
                         info('switch to chinese in insert mode')
-                        switch_to_cn()
+                        switch_to_cn(nil, is_valid)
                     end
                 end
             end, opt.delay)

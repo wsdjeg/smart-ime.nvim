@@ -38,6 +38,10 @@ function M.setup(opt)
 
     info('switch_key: ' .. switch_key)
 
+    -- Track current IM state to avoid redundant toggles.
+    -- nil = unknown (first toggle always fires), then updated on each switch.
+    local current_im = nil
+
     ---Parse key string into VK codes for keybd_event
     ---@param key_str string e.g. "ctrl+space", "shift"
     ---@return table array of VK codes
@@ -95,11 +99,21 @@ function M.setup(opt)
     end
 
     local function switch_to_en()
+        if current_im == '英语模式' then
+            info('already in english, skip toggle')
+            return
+        end
         powershell_switch('英语模式')
+        current_im = '英语模式'
     end
 
     local function switch_to_cn()
+        if current_im == '中文模式' then
+            info('already in chinese, skip toggle')
+            return
+        end
         powershell_switch('中文模式')
+        current_im = '中文模式'
     end
 
     local buffer_im = {}
@@ -110,10 +124,10 @@ function M.setup(opt)
         callback = function(ev)
             info(string.format('InsertLeave triggered, buf=%d, event=%s', ev.buf, ev.event))
 
-            -- Track state manually (no query available)
+            -- Save current IM state for this buffer before switching
             if not buffer_im[ev.buf] then
-                buffer_im[ev.buf] = '中文模式'
-                info('assuming buffer_im[' .. ev.buf .. '] = 中文模式')
+                buffer_im[ev.buf] = current_im or '中文模式'
+                info('assuming buffer_im[' .. ev.buf .. '] = ' .. (current_im or '中文模式'))
             end
 
             info('switch to english on InsertLeave')

@@ -142,6 +142,74 @@ function TestSwitch:test_insert_enter_restores_after_insert_leave()
 end
 
 -- ---------------------------------------------------------------------------
+-- Redundant toggle prevention tests
+-- ---------------------------------------------------------------------------
+
+function TestSwitch:test_insert_leave_skips_toggle_when_already_english()
+    setup_mock()
+
+    local smart_ime = require('smart-ime')
+    smart_ime.setup({ enable_log = false })
+
+    -- First InsertLeave: switches to English (current_im was nil)
+    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+
+    system_calls = {}
+
+    -- Second InsertLeave: already in English, should NOT toggle
+    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+
+    lu.assertNil(find_powershell_call(), 'should not toggle when already in English')
+end
+
+function TestSwitch:test_insert_enter_skips_toggle_when_already_chinese()
+    setup_mock()
+
+    local smart_ime = require('smart-ime')
+    smart_ime.setup({ enable_log = false })
+
+    -- InsertLeave -> English, InsertEnter -> Chinese
+    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+    vim.api.nvim_exec_autocmds('InsertEnter', { pattern = '*' })
+
+    system_calls = {}
+
+    -- Second InsertEnter: already in Chinese, should NOT toggle
+    vim.api.nvim_exec_autocmds('InsertEnter', { pattern = '*' })
+
+    lu.assertNil(find_powershell_call(), 'should not toggle when already in Chinese')
+end
+
+-- ---------------------------------------------------------------------------
+-- Picker scenario test (the bug fix)
+-- ---------------------------------------------------------------------------
+
+function TestSwitch:test_picker_scenario_no_double_toggle()
+    setup_mock()
+
+    local smart_ime = require('smart-ime')
+    smart_ime.setup({ enable_log = false })
+
+    -- 1. User in original buffer insert mode (Chinese), leaves insert -> English
+    local orig_buf = vim.api.nvim_get_current_buf()
+    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+
+    -- 2. Picker opens in a DIFFERENT buffer, InsertEnter -> no saved state, no switch
+    local picker_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_current_buf(picker_buf)
+    vim.api.nvim_exec_autocmds('InsertEnter', { pattern = '*' })
+
+    system_calls = {}
+
+    -- 3. Picker closes, InsertLeave fires for original buffer
+    --    IM is already English (picker didn't change it), should NOT toggle
+    vim.api.nvim_set_current_buf(orig_buf)
+    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+
+    lu.assertNil(find_powershell_call(), 'should not toggle when IM is already English after picker')
+end
+
+-- ---------------------------------------------------------------------------
 -- Custom switch_key tests
 -- ---------------------------------------------------------------------------
 
@@ -203,7 +271,7 @@ function TestSwitch:test_focus_gained_normal_mode_switches_to_english()
     lu.assertNotNil(find_powershell_call(), 'should switch to English on FocusGained in normal mode')
 end
 
-function TestSwitch:test_focus_gained_insert_mode_restores_chinese()
+function TestSwitch:test_focus_gained_normalizes_to_english_after_chinese()
     setup_mock()
 
     local smart_ime = require('smart-ime')
@@ -212,37 +280,13 @@ function TestSwitch:test_focus_gained_insert_mode_restores_chinese()
         delay = 0,
     })
 
-    -- Save Chinese state via InsertLeave
+    -- InsertLeave -> English, InsertEnter -> Chinese
     vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+    vim.api.nvim_exec_autocmds('InsertEnter', { pattern = '*' })
 
     system_calls = {}
 
-    -- Enter insert mode and trigger FocusGained
-    vim.cmd('startinsert')
-    vim.api.nvim_exec_autocmds('FocusGained', { pattern = '*' })
-
-    local ok = vim.wait(1000, function()
-        return #system_calls > 0
-    end, 10)
-
-    lu.assertTrue(ok, 'deferred FocusGained handler should execute within timeout')
-    lu.assertNotNil(find_powershell_call(), 'should switch to Chinese on FocusGained in insert mode')
-end
-
-function TestSwitch:test_focus_gained_normal_mode_does_not_switch_to_chinese()
-    setup_mock()
-
-    local smart_ime = require('smart-ime')
-    smart_ime.setup({
-        enable_log = false,
-        delay = 0,
-    })
-
-    -- Save Chinese state via InsertLeave
-    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
-
-    system_calls = {}
-
+    -- FocusGained in normal mode: should switch back to English
     vim.cmd('stopinsert')
     vim.api.nvim_exec_autocmds('FocusGained', { pattern = '*' })
 
@@ -251,9 +295,34 @@ function TestSwitch:test_focus_gained_normal_mode_does_not_switch_to_chinese()
     end, 10)
 
     lu.assertTrue(ok, 'deferred FocusGained handler should execute within timeout')
-    -- Should switch to English, not Chinese
+    lu.assertNotNil(find_powershell_call(), 'should switch to English on FocusGained after Chinese')
+end
+
+function TestSwitch:test_focus_gained_normal_mode_skips_when_already_english()
+    setup_mock()
+
+    local smart_ime = require('smart-ime')
+    smart_ime.setup({
+        enable_log = false,
+        delay = 0,
+    })
+
+    -- InsertLeave switches to English
+    vim.api.nvim_exec_autocmds('InsertLeave', { pattern = '*' })
+
+    system_calls = {}
+
+    vim.cmd('stopinsert')
+    vim.api.nvim_exec_autocmds('FocusGained', { pattern = '*' })
+
+    -- Wait a bit for deferred handler
+    vim.wait(200, function()
+        return #system_calls > 0
+    end, 10)
+
+    -- Already in English after InsertLeave, FocusGained should NOT toggle
     local calls = find_all_powershell_calls()
-    lu.assertTrue(#calls > 0, 'should have a PowerShell call')
+    lu.assertEquals(#calls, 0, 'should not toggle when already in English')
 end
 
 return TestSwitch
